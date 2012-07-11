@@ -6,12 +6,134 @@
 #include <string.h>
 #include "couchbase.h"
 
+#define COUCHBASE_NAME_LENGTH 11 + sizeof(void*) * 2 + 1
+#define COUCHBASE_NAME_TEMPLATE "couchbase%p"
+
+typedef struct Couchbase_Connection {
+    const char *connName;
+} Couchbase_Connection;
+
+static void
+Delete_Registry(ClientData clientData,  /* The per-interpreter data structure. */
+                Tcl_Interp *interp)     /* The interpreter being deleted. */
+{
+    Tcl_HashTable *registry;    /* Hash table of channels. */
+    Tcl_HashSearch search;      /* Search variable. */
+    Tcl_HashEntry *entry;
+    Couchbase_Connection *conn;
+
+    registry = clientData;
+    for (entry = Tcl_FirstHashEntry(registry, &search); entry != NULL;
+         entry = Tcl_FirstHashEntry(registry, &search)) {
+        conn = Tcl_GetHashValue(entry);
+        ckfree(conn);
+        Tcl_DeleteHashEntry(entry);
+    }
+    Tcl_DeleteHashTable(registry);
+    ckfree(registry);
+}
+
+static int
+Couchbase_GetFromObj(Tcl_Interp *interp,
+                     Tcl_Obj *obj,
+                     Couchbase_Connection *conn)
+{
+/* достать какой-то тип из объекта, бла-бла-бла */
+}
+
+static void
+Couchbase_Register(Tcl_Interp *interp,         /* Interpreter in which to add the channel. */
+                   Couchbase_Connection *conn) /* The connection to add to this interpreter
+                                                * registry. */
+{
+    Tcl_HashTable *registry;    /* Hash table of channels. */
+    Tcl_HashEntry *entry;       /* Search variable. */
+    int isNew;                  /* Is the hash entry new or does it exist? */
+
+    /* register the connection descriptor */
+    registry = Tcl_GetAssocData(interp, "couchbase", NULL);
+    if (registry == NULL) {
+        registry = ckalloc(sizeof(Tcl_HashTable));
+        Tcl_InitHashTable(registry, TCL_STRING_KEYS);
+        Tcl_SetAssocData(interp, "couchbase", Delete_Registry, registry);
+    }
+    entry = Tcl_CreateHashEntry(registry, conn->connName, &isNew);
+    if (!isNew) {
+        if (conn == Tcl_GetHashValue(entry)) {
+            return;
+        }
+        Tcl_Panic("Couchbase_Register: duplicate connection names");
+    }
+    Tcl_SetHashValue(entry, conn);
+}
+
+static int
+Couchbase_Get(ClientData clientData,   /* Not used. */
+              Tcl_Interp *interp,      /* Current interpreter */
+              int argc,                /* Number of arguments */
+              Tcl_Obj *const argv[])   /* Argument strings */
+{
+    Couchbase_Connection *conn = NULL;
+    int ttl = 0, extended = 0;
+    char **keys = NULL;
+    unsigned int nkeys = 0;
+
+    /* parse options */
+    {
+        static const char *options[] = {
+            "-extended", NULL
+        };
+        enum GetOpts {
+            GET_EXTENDED
+        };
+        unsigned int a, n;
+        int optionIndex;
+        for (a = 1; a < argc; ++a) {
+            const char *arg = Tcl_GetString(argv[a]);
+            if (arg[0] != '-') {
+                break;
+            }
+            if (Tcl_GetIndexFromObj(interp, argv[a], options, "option",
+                                    TCL_EXACT, &optionIndex) != TCL_OK) {
+                return TCL_ERROR;
+            }
+            if (++a >= argc) {
+                goto wrongNumArgs;
+            }
+            switch ((enum GetOpts) optionIndex) {
+            case GET_EXTENDED:
+                if (Tcl_GetBooleanFromObj(interp, argv[a], &extended) != TCL_OK) {
+                    Tcl_AppendResult(interp, " for -extended option", NULL);
+                    return TCL_ERROR;
+                }
+                continue;
+            }
+        }
+
+        if (argc - a < 2) {
+wrongNumArgs:
+            Tcl_WrongNumArgs(interp, 1, argv, "?-extended bool? conn key ?key ...?");
+            return TCL_ERROR;
+        }
+
+        if (Couchbase_GetFromObj(interp, argv[a++], &conn) != TCL_OK) {
+            return TCL_ERROR;
+        }
+        nkeys = argc - a;
+        keys = ckalloc(nkeys * sizeof(char *));
+        for (n = 0; a < argc; ++a, ++n) {
+            keys[n] = Tcl_GetString(argv[a]);
+        }
+    }
+    return TCL_OK;
+}
+
 /*
  *----------------------------------------------------------------------
  *
  * Create --
  *
- *   Implements the new Tcl "couchbase::create" command.
+ *   Implements the new Tcl "couchbase" command.
  *
  * Results:
  *  A standard Tcl result
@@ -21,116 +143,102 @@
  *
  *----------------------------------------------------------------------
  */
-
 static int
-Create_Cmd(
-           ClientData clientData,   /* Not used. */
-           Tcl_Interp *interp,      /* Current interpreter */
-           int argc,                /* Number of arguments */
-           Tcl_Obj *const argv[]    /* Argument strings */
-)
+Couchbase_Connect(ClientData clientData,   /* Not used. */
+                  Tcl_Interp *interp,      /* Current interpreter */
+                  int argc,                /* Number of arguments */
+                  Tcl_Obj *const argv[])   /* Argument strings */
 {
-    static const char *options[] = {
-        "-hostname", "-port", "-pool", "-bucket", "-username", "-password", NULL
-    };
-    enum ShaOpts {
-        CBOPT_HOSTNAME, CBOPT_PORT, CBOPT_POOL, CBOPT_BUCKET, CBOPT_USERNAME, CBOPT_PASSWORD
-    };
-    Tcl_Obj *hostname_obj = NULL;
-    Tcl_Obj *port_obj = NULL;
-    Tcl_Obj *pool_obj = NULL;
-    Tcl_Obj *bucket_obj = NULL;
-    Tcl_Obj *username_obj = NULL;
-    Tcl_Obj *password_obj = NULL;
-    int a;
+    char *hostname = NULL, *pool = NULL, *bucket = NULL, *username = NULL, *password = NULL;
+    int port = 8091;
 
-    for (a = 1; a < argc; a++) {
-        int index;
-
-        if (Tcl_GetIndexFromObj(interp, argv[a], options, "option", 0, &index) != TCL_OK) {
+    /* parse options */
+    {
+        static const char *options[] = {
+            "-hostname", "-port", "-pool", "-bucket", "-username", "-password", NULL
+        };
+        enum ConnectOpts {
+            CONN_HOSTNAME, CONN_PORT, CONN_POOL, CONN_BUCKET, CONN_USERNAME, CONN_PASSWORD
+        };
+        unsigned int a;
+        int optionIndex;
+        for (a = 1; a < argc; ++a) {
+            const char *arg = Tcl_GetString(argv[a]);
+            if (arg[0] != '-') {
+                break;
+            }
+            if (Tcl_GetIndexFromObj(interp, argv[a], options, "option",
+                                    TCL_EXACT, &optionIndex) != TCL_OK) {
+                return TCL_ERROR;
+            }
+            if (++a >= argc) {
+                goto wrongNumArgs;
+            }
+            switch ((enum ConnectOpts) optionIndex) {
+            case CONN_HOSTNAME:
+                hostname = Tcl_GetString(argv[a]);
+                continue;
+            case CONN_PORT:
+                if (Tcl_GetIntFromObj(interp, argv[a], &port) != TCL_OK) {
+                    Tcl_AppendResult(interp, " for -port option", NULL);
+                    return TCL_ERROR;
+                }
+                continue;
+            case CONN_POOL:
+                pool = Tcl_GetString(argv[a]);
+                continue;
+            case CONN_BUCKET:
+                bucket = Tcl_GetString(argv[a]);
+                continue;
+            case CONN_USERNAME:
+                username = Tcl_GetString(argv[a]);
+                continue;
+            case CONN_PASSWORD:
+                password = Tcl_GetString(argv[a]);
+                continue;
+            }
+        }
+        if (a < argc) {
+wrongNumArgs:
+            Tcl_WrongNumArgs(interp, 1, argv,
+                             "?-hostname str? ?-port num?  ?-pool str? ?-bucket str?  ?-username str? ?-password str?");
             return TCL_ERROR;
         }
-        if (++a >= argc) {
-            goto wrongArgs;
-        }
-        switch ((enum ShaOpts) index) {
-        case CBOPT_HOSTNAME:
-            hostname_obj = argv[a];
-            continue;
-        case CBOPT_PORT:
-            port_obj = argv[a];
-            continue;
-        case CBOPT_POOL:
-            pool_obj = argv[a];
-            continue;
-        case CBOPT_BUCKET:
-            bucket_obj = argv[a];
-            continue;
-        case CBOPT_USERNAME:
-            username_obj = argv[a];
-            continue;
-        case CBOPT_PASSWORD:
-            password_obj = argv[a];
-            continue;
-        }
     }
 
+    /*
+     * set defaults
+     */
+    if (hostname == NULL) {
+        hostname = strdup("localhost");
+    }
+    if (pool == NULL) {
+        pool = strdup("default");
+    }
+    if (bucket == NULL) {
+        bucket = strdup("default");
+    }
+    (void)username;
+    (void)password;
+
+    /*
+     * create connection
+     */
     {
-        char *hostname, *pool, *bucket, *username = NULL, *password = NULL;
-        int port = 8091;
+        Couchbase_Connection *conn = NULL;
+        char connName[COUCHBASE_NAME_LENGTH];
 
-        if (hostname_obj != NULL) {
-            hostname = Tcl_GetStringFromObj(hostname_obj, NULL);
-        } else {
-            hostname = strdup("localhost");
+        conn = ckalloc(sizeof(Couchbase_Connection));
+        if (conn == NULL) {
+            return TCL_ERROR;
         }
-        if (port_obj != NULL) {
-            if (Tcl_GetIntFromObj(interp, port_obj, &port) != TCL_OK) {
-                goto wrongArgs;
-            }
-        }
-        if (pool_obj != NULL) {
-            pool = Tcl_GetStringFromObj(pool_obj, NULL);
-        } else {
-            pool = strdup("default");
-        }
-        if (bucket_obj != NULL) {
-            bucket = Tcl_GetStringFromObj(bucket_obj, NULL);
-        } else {
-            bucket = strdup("default");
-        }
-        if (username_obj != NULL) {
-            username = Tcl_GetStringFromObj(username_obj, NULL);
-        }
-        if (password_obj != NULL) {
-            password = Tcl_GetStringFromObj(password_obj, NULL);
-        }
-
-        fprintf(stderr, "connecting to http://%s:%d/pools/%s/buckets/%s/\n",
-                hostname, port, pool, bucket);
-        if (username != NULL || password != NULL) {
-            fprintf(stderr, "auth: \n");
-            if (username != NULL) {
-                fprintf(stderr, "\tusername: %s\n", username);
-            }
-            if (password != NULL) {
-                fprintf(stderr, "\tpassword: %s\n", password);
-            }
-            fprintf(stderr, "\n");
-        }
+        memset(conn, 0, sizeof(Couchbase_Connection));
+        sprintf(connName, COUCHBASE_NAME_TEMPLATE, conn);
+        conn->connName = strdup(connName);
+        Couchbase_Register(interp, conn);
+        Tcl_AppendResult(interp, conn->connName, NULL);
     }
-
     return TCL_OK;
-
-wrongArgs:
-    Tcl_AppendResult(interp, "wrong # args: should be either:\n",
-                     "  ",
-                     Tcl_GetString(argv[0]),
-                     "  ?-hostname hostname? ?-port num?\n",
-                     "      ?-pool poolname? ?-bucket bucketname?\n",
-                     "      ?-username username? ?-password password?\n",
-                     (char *) NULL);
-    return TCL_ERROR;
 }
 
 /*
@@ -145,11 +253,10 @@ wrongArgs:
  *
  * Side effects:
  *  The Couchbase package is created.
- *  One new command "sha1" is added to the Tcl interpreter.
+ *  One new command "couchbase" is added to the Tcl interpreter.
  *
  *----------------------------------------------------------------------
  */
-
 int
 Couchbase_Init(Tcl_Interp *interp)
 {
@@ -166,8 +273,8 @@ Couchbase_Init(Tcl_Interp *interp)
     if (Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION) != TCL_OK) {
         return TCL_ERROR;
     }
-    Tcl_CreateObjCommand(interp, "couchbase::connect", (Tcl_ObjCmdProc *) Create_Cmd,
-                         (ClientData)NULL, (Tcl_CmdDeleteProc *)NULL);
+    Tcl_CreateObjCommand(interp, "couchbase::connect", Couchbase_Connect, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "couchbase::get", Couchbase_Get, NULL, NULL);
 
     return TCL_OK;
 }

@@ -22,15 +22,17 @@ Delete_Registry(ClientData clientData,  /* The per-interpreter data structure. *
     Tcl_HashEntry *entry;
     Couchbase_Connection *conn;
 
+    (void)interp;
+
     registry = clientData;
     for (entry = Tcl_FirstHashEntry(registry, &search); entry != NULL;
          entry = Tcl_FirstHashEntry(registry, &search)) {
         conn = Tcl_GetHashValue(entry);
-        ckfree(conn);
+        ckfree((void *)conn);
         Tcl_DeleteHashEntry(entry);
     }
     Tcl_DeleteHashTable(registry);
-    ckfree(registry);
+    ckfree((void *)registry);
 }
 
 static int
@@ -38,7 +40,12 @@ Couchbase_GetFromObj(Tcl_Interp *interp,
                      Tcl_Obj *obj,
                      Couchbase_Connection *conn)
 {
-/* достать какой-то тип из объекта, бла-бла-бла */
+    /* достать какой-то тип из объекта, бла-бла-бла */
+    (void)interp;
+    (void)obj;
+    (void)conn;
+
+    return 0;
 }
 
 static void
@@ -53,7 +60,7 @@ Couchbase_Register(Tcl_Interp *interp,         /* Interpreter in which to add th
     /* register the connection descriptor */
     registry = Tcl_GetAssocData(interp, "couchbase", NULL);
     if (registry == NULL) {
-        registry = ckalloc(sizeof(Tcl_HashTable));
+        registry = (void *)ckalloc(sizeof(Tcl_HashTable));
         Tcl_InitHashTable(registry, TCL_STRING_KEYS);
         Tcl_SetAssocData(interp, "couchbase", Delete_Registry, registry);
     }
@@ -76,7 +83,9 @@ Couchbase_Get(ClientData clientData,   /* Not used. */
     Couchbase_Connection *conn = NULL;
     int ttl = 0, extended = 0;
     char **keys = NULL;
-    unsigned int nkeys = 0;
+    int nkeys = 0;
+
+    (void)clientData;
 
     /* parse options */
     {
@@ -84,9 +93,10 @@ Couchbase_Get(ClientData clientData,   /* Not used. */
             "-extended", NULL
         };
         enum GetOpts {
-            GET_EXTENDED
+            GET_EXTENDED,
+            GET_TTL
         };
-        unsigned int a, n;
+        int a, n;
         int optionIndex;
         for (a = 1; a < argc; ++a) {
             const char *arg = Tcl_GetString(argv[a]);
@@ -107,20 +117,26 @@ Couchbase_Get(ClientData clientData,   /* Not used. */
                     return TCL_ERROR;
                 }
                 continue;
+            case GET_TTL:
+                if (Tcl_GetIntFromObj(interp, argv[a], &ttl) != TCL_OK) {
+                    Tcl_AppendResult(interp, " for -ttl option", NULL);
+                    return TCL_ERROR;
+                }
+                continue;
             }
         }
 
         if (argc - a < 2) {
 wrongNumArgs:
-            Tcl_WrongNumArgs(interp, 1, argv, "?-extended bool? conn key ?key ...?");
+            Tcl_WrongNumArgs(interp, 1, argv, "?-extended bool? ?-ttl num? conn key ?key ...?");
             return TCL_ERROR;
         }
 
-        if (Couchbase_GetFromObj(interp, argv[a++], &conn) != TCL_OK) {
+        if (Couchbase_GetFromObj(interp, argv[a++], conn) != TCL_OK) {
             return TCL_ERROR;
         }
         nkeys = argc - a;
-        keys = ckalloc(nkeys * sizeof(char *));
+        keys = (void *)ckalloc(nkeys * sizeof(char *));
         for (n = 0; a < argc; ++a, ++n) {
             keys[n] = Tcl_GetString(argv[a]);
         }
@@ -152,6 +168,8 @@ Couchbase_Connect(ClientData clientData,   /* Not used. */
     char *hostname = NULL, *pool = NULL, *bucket = NULL, *username = NULL, *password = NULL;
     int port = 8091;
 
+    (void)clientData;
+
     /* parse options */
     {
         static const char *options[] = {
@@ -160,8 +178,7 @@ Couchbase_Connect(ClientData clientData,   /* Not used. */
         enum ConnectOpts {
             CONN_HOSTNAME, CONN_PORT, CONN_POOL, CONN_BUCKET, CONN_USERNAME, CONN_PASSWORD
         };
-        unsigned int a;
-        int optionIndex;
+        int a, optionIndex;
         for (a = 1; a < argc; ++a) {
             const char *arg = Tcl_GetString(argv[a]);
             if (arg[0] != '-') {
@@ -228,12 +245,12 @@ wrongNumArgs:
         Couchbase_Connection *conn = NULL;
         char connName[COUCHBASE_NAME_LENGTH];
 
-        conn = ckalloc(sizeof(Couchbase_Connection));
+        conn = (void *)ckalloc(sizeof(Couchbase_Connection));
         if (conn == NULL) {
             return TCL_ERROR;
         }
         memset(conn, 0, sizeof(Couchbase_Connection));
-        sprintf(connName, COUCHBASE_NAME_TEMPLATE, conn);
+        sprintf(connName, COUCHBASE_NAME_TEMPLATE, (void *)conn);
         conn->connName = strdup(connName);
         Couchbase_Register(interp, conn);
         Tcl_AppendResult(interp, conn->connName, NULL);

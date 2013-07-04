@@ -1527,6 +1527,7 @@ AC_DEFUN([TEA_CONFIG_CFLAGS], [
 
 	    # TEA specific:
 	    CFLAGS_OPTIMIZE="-O2 -fomit-frame-pointer"
+	    CFLAGS_DEBUG="-O0 -ggdb3 -Werror -Wall -Wextra -pedantic"
 
 	    # TEA specific: use LDFLAGS_DEFAULT instead of LDFLAGS
 	    SHLIB_LD='${CC} -shared ${CFLAGS} ${LDFLAGS_DEFAULT}'
